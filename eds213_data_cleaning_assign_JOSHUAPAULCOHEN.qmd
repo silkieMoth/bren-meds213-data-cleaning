@@ -1,0 +1,35 @@
+---
+title: "eds213_data_cleaning_assign_JOSHUAPAULCOHEN"
+format: html
+---
+
+```{r}
+library(tidyverse)
+
+temp_fp <- "data/processed/snow_cover_hw.csv"
+
+cover <- read_csv(temp_fp)
+```
+
+
+#### Get data type and number of NAs for each column
+```{r}
+for (col in names(cover)[6:9]){
+  cat(names(cover[col]), "\n", 
+         "\t", "type:", class(cover[col]), "\n", 
+         "\t", "NAs", is.na(cover[col]) %>% sum(), "\n"
+  )
+}
+
+```
+
+## Working with `Water_cover`
+
+#### View unique values
+```{r}
+cover
+```
+
+
+
+Only value discrepency is the NAs

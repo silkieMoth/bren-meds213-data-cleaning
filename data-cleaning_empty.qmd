@@ -49,7 +49,9 @@ snowsurvey_csv %>%
 Let's focus on the non-numeric values as a starting point:
 
 ```{r}
-snowsurvey_csv %>%
+snowsurvey_csv %>% 
+  count(Snow_cover) %>% 
+  filter(is.na(as.numeric(Snow_cover)))
 
 ```
 
@@ -68,7 +70,9 @@ snowsurvey_csv %>%
 Interestingly, when there is a "dot" for snow cover, it is also the case for all the other covers. Let's replace those with NA since there is no supplemental information in the provided metadata about the use of dots
 
 ```{r}
-snowsurvey_fixed <- 
+snowsurvey_fixed <- snowsurvey_csv %>%
+  mutate(across(Snow_cover:Total_cover, ~ ifelse(.x == ".", NA, .x)))
+  
 ```
 
 #### `-` values
@@ -76,14 +80,18 @@ snowsurvey_fixed <-
 Is he problem is similar with "-"?
 
 ```{r}
-snowsurvey_csv 
+snowsurvey_csv %>% 
+  # filter(if_any(matches("-"), ~ .x == TRUE))
+  filter_all(any_vars(. == "-"))
+  # filter(grepl('-', Snow_cover))
 ```
 
 
 let's set it to NA:
 
 ```{r}
-snowsurvey_fixed <- 
+snowsurvey_fixed <- snowsurvey_fixed %>%
+  mutate(across(everything(), ~ ifelse(.x == "-", NA, .x)))
 ```
 
 #### `n/a` values
@@ -92,6 +100,7 @@ snowsurvey_fixed <-
 
 ```{r}
 snowsurvey_csv %>%
+  filter_all(any_vars(. == "n/a"))
   
 ```
 
@@ -99,7 +108,8 @@ snowsurvey_csv %>%
 Same pattern, let's substitute with NA:
 
 ```{r}
-snowsurvey_fixed <- 
+snowsurvey_fixed <- snowsurvey_fixed %>%
+  mutate(across(everything(), ~ ifelse(.x == "n/a", NA, .x)))
  
 ```
 
@@ -109,12 +119,14 @@ What about "unk"? It is probably an abbreviation for unknown:
 
 ```{r}
 snowsurvey_csv %>%
+  filter_all(any_vars(. == "unk"))
   
 ```
 
 
 ```{r}
-snowsurvey_fixed <- 
+snowsurvey_fixed <- snowsurvey_fixed %>% 
+  mutate(across(everything(), ~ ifelse(.x == "unk", NA, .x)))
 ```
 
 #### `<1` values
@@ -122,11 +134,14 @@ snowsurvey_fixed <-
 Finally What should we replace"<1" with?
 
 ```{r}
+snowsurvey_csv %>%
+  filter_at(vars(Snow_cover:Total_cover), all_vars(. > 100))
 
 ```
 
 ```{r}
-
+snowsurvey_fixed <- snowsurvey_fixed %>% 
+  mutate(across(everything(), ~ ifelse(.x == "<1", 0, .x)))
 ```
 
 
@@ -143,7 +158,10 @@ snowsurvey_fixed %>%
 Ok, we can do the transformation:
 
 ```{r}
-snowsurvey_fixed <- 
+snowsurvey_fixed <- snowsurvey_fixed %>% 
+  mutate(across(Snow_cover:Total_cover, ~ as.numeric(.x)))
+
+glimpse(snowsurvey_fixed)
 ```
 
 Yeah we have finally a numeric column 🎉. 
@@ -154,19 +172,27 @@ Yeah we have finally a numeric column 🎉.
 We are dealing with percentages, so we should verify that all the values are between 0 and 100:
 
 ```{r}
- snowsurvey_fixed 
+ snowsurvey_fixed %>% 
+  select(Snow_cover:Total_cover) %>% 
+  filter(if_any(everything(), ~ . > 100 | . < 0)) 
+  
 ```
 
 We have two values above 100, with an interesting 470%! ☃️ We should probably set those values to NAs:
 
 ```{r}
-snowsurvey_fixed <- 
+snowsurvey_fixed <-  snowsurvey_fixed %>% 
+  select(Snow_cover:Total_cover) %>% 
+  filter(if_any(everything(), ~ . > 100 | . < 0)) %>% 
+  mutate(across(everything(), ~ ifelse(. > 100 | . < 0, NA, .)))
 ```
 
 Let's check for negative values:
 
 ```{r}
- snowsurvey_fixed %>%
+ snowsurvey_fixed %>% 
+  select(Snow_cover:Total_cover) %>% 
+  filter(if_any(everything(), ~ . < 0))
   
 ```
 
@@ -213,31 +239,48 @@ This data model is not convenient for a database, we will have to switch to a lo
 ### Data cleaning
 
 ```{r}
-species_long <- 
+species_long <- species_csv %>% 
+#  filter(if_any(Alder_Flycatcher:Yellow_rumped_Warbler, ~ . != 0 | . != 1)) %>% 
+  mutate(across(Alder_Flycatcher:Yellow_rumped_Warbler, ~ ifelse(. != 0, 1, 0))) %>% 
+  mutate(across(Alder_Flycatcher:Yellow_rumped_Warbler, ~ as.numeric(.))) %>% 
+  # mutate(across(Alder_Flycatcher:Yellow_rumped_Warbler, ~ as.numeric(.x))) %>%
+  pivot_longer(cols = Alder_Flycatcher:Yellow_rumped_Warbler,
+               names_to = "Species",
+               values_to = "Presence")
+
+glimpse(species_long)
 ```
+
+```{r}
+species_csv %>% 
+  select(Alder_Flycatcher:Yellow_rumped_Warbler) %>% 
+  filter(if_any(everything(), ~ . != 0 | . != 1)) %>% 
+  mutate(across(everything(), ~ ifelse(. %in% c(0,1), ., NA))) %>% 
+  filter(if_any(everything(), ~ . != 0 & . != 1))
+```
+
 
 
 We want to focus on the presence and absence of species and not the count. Let's create a new column for presence where anything else than 0 is considered present
 
 ```{r}
-species_presence <- species_long %>%
+species_presence <- species_long
   
 ```
 
 We can remove some columns: "Num_observers", "All_obs_reported", "Observer_hours" are here to help to compute the effort of observation but since we just want presence and absence, we do not need it. We can also remove all the zeros values to reduce the size of our data set:
 
 ```{r}
-species_presence <- species_presence %>%
-  
-
+species_presence <- species_presence %>% 
+  select(-Num_observers, -All_obs_reported, -Observer_hours)
 ```
 
 Last but not least, let's have a look at our species list
 
 ```{r}
 species_presence %>%
-  filter(species_presence == 1) %>%
-  count(species) %>%
+  filter(Presence == 1) %>%
+  count(Species) %>%
   arrange(desc(n))
 ```
 
