@@ -3,33 +3,419 @@ title: "eds213_data_cleaning_assign_JOSHUAPAULCOHEN"
 format: html
 ---
 
+# Call libraries and cover type file
 ```{r}
 library(tidyverse)
 
-temp_fp <- "data/processed/snow_cover_hw.csv"
+temp_fp <- "data/processed/snow_cover.csv"
 
 cover <- read_csv(temp_fp)
 ```
 
 
-#### Get data type and number of NAs for each column
+## Analysis of the cover columns
+
+##### data types
 ```{r}
-for (col in names(cover)[6:9]){
-  cat(names(cover[col]), "\n", 
-         "\t", "type:", class(cover[col]), "\n", 
-         "\t", "NAs", is.na(cover[col]) %>% sum(), "\n"
-  )
+as.col_spec(cover[6:9])
+```
+
+
+##### number of NAs
+```{r}
+cover %>% 
+  select(Snow_cover:Total_cover) %>% # select `*_cover` cols 
+  summarise(across(everything(), ~ sum(is.na(.)))) # get sum of NAS for those cols
+```
+
+
+##### problematic values
+```{r, warning = FALSE}
+
+# for each `*_cover` col
+for (col in names(cover[6:9])){
+  
+  # init list
+  output_list = list()
+  
+  # for every unique value in a given `*_cover` col
+  for (val in cover[[col]] %>% unique()){
+    
+    # select all NAs, string values and vals outside range
+    if (
+        # using is.numeric on str returns NA
+        (is.na(as.numeric(val))) ||
+        # if val is not NA...
+        (!is.na(as.numeric(val)) &&
+         # ...return values that are outside the 0-100 range
+          (as.numeric(val) < 0 || 
+         as.numeric(val) > 100))  # Out-of-range numeric values
+) {
+
+      output_list <- output_list %>% append(val) # append to output list
+    }
+  }
+  
+  cat(paste(col, "problematic unique values:\n"))
+
+  print(paste(output_list))
+  cat("\n")
 }
-
 ```
 
-## Working with `Water_cover`
+# Fixing problematic unique values for `Water_cover` and `Land_cover`
 
-#### View unique values
+##### Print total number of observations with values preventing proper data type conversion in the `*_cover` columns
 ```{r}
-cover
+bad_val_nrows <- cover %>% 
+  filter(
+  
+  # if any of the string values listed above
+  if_any(Snow_cover:Total_cover, ~ .x %in% c("unk", "n/a", "NA"))
+  
+  ) %>%
+  
+  # all observations that fit the above condition
+  nrow()
+
+
+cat("Number of rows with strings before fixing problematic values:", bad_val_nrows)
+```
+
+##### Convert them to the computer recognized `NA`
+```{r}
+cover_fix <- cover %>% 
+  mutate(
+    
+    # for all `*_cover` columns, convert str to NA
+    across(Snow_cover:Total_cover, ~ case_when(
+    .x == "unk" | 
+    .x == "n/a" ~ 
+      NA, 
+    .default = .x # else, keep original value 
+    )
+  )
+)
+```
+
+##### Reprint problematic rows after reassignment
+```{r}
+good_vals_nrows <- cover_fix %>% filter(
+  
+  # for any of the problematic string vals
+  if_any(Snow_cover:Total_cover, ~ .x %in% c("unk", "n/a", "NA"))
+) %>% 
+  
+  # get all obs that still have them
+  nrow()
+
+# none are left
+cat("Number of rows with strings after removing problematic values:", good_vals_nrows)
 ```
 
 
+# Correcting Data Types
 
-Only value discrepency is the NAs
+##### Convert data types for all `*_cover` columns
+
+Possible now that all str values are NA'd
+```{r}
+cover_fix2 <- cover_fix %>% 
+  mutate(
+    
+    # make all values in `*_cover` numeric
+    across(Snow_cover:Total_cover, ~ as.numeric(.x))
+  )
+```
+
+### Data types after correction
+```{r}
+as.col_spec(cover_fix2[6:9])
+```
+
+
+# Making cover variables respect percentage expectations
+
+##### Print number of and rows that need to be fixed
+```{r}
+bad_pct_nrows <- cover_fix2 %>% filter(
+  
+  # for all values in `*_cover` cols out of range
+  if_any(Snow_cover:Total_cover, ~ .x > 100 | .x < 0)
+  )
+
+# print bad obs
+cat("Number if rows not respecting percentage expectations before fixing:", bad_pct_nrows %>% nrow())
+
+bad_pct_nrows
+```
+
+
+##### Change coverage values based on special cases.
+
+My rationale for this is...
+* It seemed pretty reasonable to force values to be 0 or 100 if they are generally close to it, as this is what we did in class.
+* I however decided that 100 from the percentage window was too much deviation for the observation to be valid, and made it NA
+* The special case of -100 I figured is just an input error, which was just mean to be positive 100.
+```{r}
+cover_fix3 <- cover_fix2 %>% 
+  mutate(
+    
+    # for all `*_cover` cols
+    across(Snow_cover:Total_cover, ~ case_when(
+      
+      # make -100 positive specifically
+      .x == -100 ~ abs(.x),
+      
+      # NA vals too far outside the range
+      .x > 200 | .x < -100 ~ NA, 
+      
+      # force vals outside but close to range within range
+      .x > 100 ~ 100,
+      .x < 0 ~ 0, 
+      
+      # return original val if val is ok
+      .default = .x
+      )
+    )
+  )
+```
+
+##### Demonstrate that all rows have been fixed.
+```{r}
+good_pct_nrows <- cover_fix3 %>% filter(
+  
+  # for all `*_cover` cols
+  if_any(Snow_cover:Total_cover, ~ .x > 100 | .x < 0)
+  ) %>% 
+  
+  # get obs
+  nrow()
+
+cat("Number if rows not respecting percentage expectations before fixing:", good_pct_nrows)
+```
+
+# Recompute `Total_cover`
+
+To do this, we will be recalculating `Snow_cover`, `Water_cover`, and `Land_cover` for rows in which they don't add up to 100%, by finding the ratio between the three and calculating a set of values that adds up to 100% based on said ratio.
+
+I thought this method for cleaning the data would be appropriate because even when the `*_cover` columns don't add up to 100, they likely still generally reflect the total coverage of an area, and field data is frequently collected with a lower level of precision anyway.
+
+### Create function
+This takes in a list of numbers, finds the ratio between them, then calculates values that are both equal to the found ratio and sum to 100.
+```{r}
+ratio_pct <- function(vals, from = 1, to = length(vals)){
+  
+  # collect original values before transmutation
+  original_vals <- vals
+  
+  # iterate through the input values...
+  for (i in 1:length(vals)){
+    
+    # ...and if any of them are NA...
+    if (is.na(vals[i]) == TRUE){
+      
+      # quit the function and just return the original vals, 
+      # we'll omit the observation later
+      return(original_vals)
+      
+      # if any of the vals are 0, force it to very low number
+      # else it will break the function (we would divide by 0)
+    } else if (vals[i] == 0){
+      vals[i] <- 1e-9
+    }
+  }
+  
+  # calculate ratio between imputted vals
+  ratio <- vals/min(vals)
+  
+  # convert ratioed vals to percents that sum to 100
+  percents <- ratio / sum(ratio) * 100
+  
+  # choose which vals in the list to return (default is all of them)
+  pct_return <- percents[from:to]
+  return(pct_return)
+}
+```
+
+##### Mutate cover DF with function
+In this case, it can perform those calculations with all 3 of our cover variables.
+```{r}
+
+cover_fix4 <- cover_fix3 %>% 
+  
+  # force functions to perform on every row individually
+  rowwise() %>% 
+  
+  # create indicator col for if the 3 `*_cover` cols = 100...
+  mutate(cond_trigger = ifelse(Snow_cover + Water_cover + Land_cover != 100, 
+                               TRUE, FALSE)
+         ) %>%  
+  
+  # ...and run the ratio percent function on all rows where that isn't the case
+  mutate(
+    Snow_cover = ifelse(cond_trigger == TRUE, 
+                        
+                        # grab cover col values by row for function, 
+                        # and choose respective val for given `*_cover` col
+                        ratio_pct(pick(Snow_cover:Land_cover))[1], 
+                        
+                        # return original vals if `*_cover` cols = 100
+                        Snow_cover) %>% 
+      
+      # reformat output
+    as.numeric() %>% round(2),
+    
+    # repeat with rest of `*_cover` cols
+    Water_cover = ifelse(cond_trigger == TRUE, 
+                         ratio_pct(pick(Snow_cover:Land_cover))[2], 
+                         Water_cover) %>% 
+    as.numeric() %>% round(2), 
+    Land_cover = ifelse(cond_trigger == TRUE, 
+                        ratio_pct(pick(Snow_cover:Land_cover))[3], 
+                        Land_cover) %>% 
+    as.numeric() %>% round(2)
+         ) %>% 
+  
+  # negate rowwise
+  ungroup() %>% 
+  
+  # recompute cover with new vals if it doesn't equal 100
+  mutate(Total_cover = ifelse(Total_cover != 100, 
+                              Snow_cover + Water_cover + Land_cover, 
+                              Total_cover
+                       )
+         ) %>% 
+  
+  # eject indicator col so it's not in final table
+  select(-cond_trigger)
+
+cover_fix4
+```
+
+
+### Demonstrate effectiveness of this method
+
+##### Create before DFs (``*_cover`` sum 100 and `total_covers` = 100)
+```{r}
+# create indicator columns
+before_setup <- cover_fix3 %>%
+  
+  mutate(
+    
+    # if cover cols equal 100
+    equal_ind = ifelse(Snow_cover + Water_cover + Land_cover == 100, 
+                       TRUE, FALSE),
+    
+    # if total_cover equals 100
+    total_ind = ifelse(Total_cover == 100, 
+                       TRUE, FALSE
+                       )
+  )
+
+# group by and get counts for those indicator vars
+before_eql <- before_setup %>% 
+  group_by(equal_ind) %>%
+  summarize(equal_covers = n())
+
+before_tot <- before_setup %>% 
+  group_by(total_ind) %>% 
+  summarize(total_100 = n())
+
+# attach both together to get df containing values for before value correction
+before_mast <- cbind(before_eql, before_tot)
+```
+
+
+##### Create after DFs (`*_cover` sum 100 and total_covers = 100)
+```{r}
+
+# create indicator columns
+after_setup <- cover_fix4 %>%
+  
+  mutate(
+    
+    # if cover cols equal 100
+    equal_ind = ifelse(Snow_cover + Water_cover + Land_cover == 100, 
+                       TRUE, FALSE), 
+    
+    # if total_cover equals 100
+    total_ind = ifelse(Total_cover == 100, 
+                       TRUE, FALSE
+                       )
+  )
+
+# group by and get counts for those indicator vars
+after_eql <- after_setup %>% 
+  group_by(equal_ind) %>%
+  summarize(equal_covers = n())
+
+after_tot <- after_setup %>% 
+  group_by(total_ind) %>% 
+  summarize(total_100 = n())
+
+# for values after value correction was performed on cover cols
+after_mast <- cbind(after_eql, after_tot)
+```
+
+##### Calculate percent improvement for each year
+```{r}
+
+# df for before value correction
+diff_yr_eqlbefore <- before_setup %>% 
+  
+  # make col for count of observations by year
+  add_count(Year) %>% 
+  
+  # get counts of obs that are now correct
+  filter(equal_ind == TRUE) %>% 
+  group_by(Year) %>% 
+  summarize(before_count = n(), 
+            total_before = mean(n)
+           )
+
+# df for after values correction
+diff_yr_eqlafter <- after_setup %>% 
+  
+  # make col for count of observations by year
+  add_count(Year) %>% 
+  
+  # get counts of obs that are now correct
+  filter(equal_ind == TRUE) %>% 
+  group_by(Year) %>% 
+  summarize(after_count = n(), 
+            total_after = mean(n)
+           )
+
+# create master improvement df
+diff_yr_eqlmast <- diff_yr_eqlbefore %>%
+  
+  # join before and after together by year
+  left_join(diff_yr_eqlafter, by = join_by(Year)) %>% 
+  
+  # get a percentage for the amount of improvement
+  mutate(pct_improvement = round(
+    ((after_count/total_after) - (before_count/total_before))*100, 2)
+      )
+
+diff_yr_eqlmast
+```
+
+# Omit remaining faulty observations
+
+We remove all rows that were unable to be corrected, although I think it's more appropriate to mark them as being bad data in the notes column.
+
+```{r}
+cover_fix_final <- cover_fix4 %>% 
+  filter(Snow_cover + Water_cover + Land_cover == 100 & Total_cover == 100)
+```
+
+# Write csv
+```{r}
+write_csv(cover_fix_final, "data/processed/all_cover_fixed_JOSHUAPAULCOHEN.csv")
+```
+
+# Print final table
+```{r}
+cover_fix_final
+```
