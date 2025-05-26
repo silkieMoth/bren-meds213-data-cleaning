@@ -1,0 +1,274 @@
+---
+title: "eds213_data_cleaning_assign_JOSHUAPAULCOHEN"
+format: html
+---
+
+# Call libraries and cover type file
+```{r}
+library(tidyverse)
+
+temp_fp <- "data/processed/snow_cover.csv"
+
+cover <- read_csv(temp_fp)
+```
+
+
+## Analysis of the cover columns
+
+##### data types
+```{r}
+as.col_spec(cover[6:9])
+```
+
+
+##### number of NAs
+```{r}
+cover %>% 
+  select(Snow_cover:Total_cover) %>% # select `*_cover` cols 
+  summarise(across(everything(), ~ sum(is.na(.)))) # get sum of NAS for those cols
+```
+
+
+##### problematic values
+```{r, warning = FALSE}
+
+# for each `*_cover` col
+for (col in names(cover[6:9])){
+  
+  # init list
+  output_list = list()
+  
+  # for every unique value in a given `*_cover` col
+  for (val in cover[[col]] %>% unique()){
+    
+    # select all NAs, string values and vals outside range
+    if (
+        # using is.numeric on str returns NA
+        (is.na(as.numeric(val))) ||
+        # if val is not NA...
+        (!is.na(as.numeric(val)) &&
+         # ...return values that are outside the 0-100 range
+          (as.numeric(val) < 0 || 
+         as.numeric(val) > 100))  # Out-of-range numeric values
+) {
+
+      output_list <- output_list %>% append(val) # append to output list
+    }
+  }
+  
+  cat(paste(col, "problematic unique values:\n"))
+
+  print(paste(output_list))
+  cat("\n")
+}
+```
+
+# Fixing problematic unique values for `Water_cover` and `Land_cover`
+
+##### Print total number of observations with values preventing proper data type conversion in the `*_cover` columns
+```{r}
+bad_val_nrows <- cover %>% 
+  filter(
+  
+  # if any of the string values listed above
+  if_any(Snow_cover:Total_cover, ~ .x %in% c("unk", "n/a", "NA"))
+  
+  ) %>%
+  
+  # all observations that fit the above condition
+  nrow()
+
+
+cat("Number of rows with strings before fixing problematic values:", bad_val_nrows)
+```
+
+##### Convert them to the computer recognized `NA`
+```{r}
+cover_fix <- cover %>% 
+  mutate(
+    
+    # for all `*_cover` columns, convert str to NA
+    across(Snow_cover:Total_cover, ~ case_when(
+    .x == "unk" | 
+    .x == "n/a" ~ 
+      NA, 
+    .default = .x # else, keep original value 
+    )
+  )
+)
+```
+
+##### Reprint problematic rows after reassignment
+```{r}
+good_vals_nrows <- cover_fix %>% filter(
+  
+  # for any of the problematic string vals
+  if_any(Snow_cover:Total_cover, ~ .x %in% c("unk", "n/a", "NA"))
+) %>% 
+  
+  # get all obs that still have them
+  nrow()
+
+# none are left
+cat("Number of rows with strings after removing problematic values:", good_vals_nrows)
+```
+
+
+# Correcting Data Types
+
+##### Convert data types for all `*_cover` columns
+
+Possible now that all str values are NA'd
+```{r}
+cover_fix2 <- cover_fix %>% 
+  mutate(
+    
+    # make all values in `*_cover` numeric
+    across(Snow_cover:Total_cover, ~ as.numeric(.x))
+  )
+```
+
+### Data types after correction
+```{r}
+as.col_spec(cover_fix2[6:9])
+```
+
+
+# Making cover variables respect percentage expectations
+
+##### Print number of and rows that need to be fixed
+```{r}
+bad_pct_nrows <- cover_fix2 %>% filter(
+  
+  # for all values in `*_cover` cols out of range
+  if_any(Snow_cover:Total_cover, ~ .x > 100 | .x < 0)
+  )
+
+# print bad obs
+cat("Number if rows not respecting percentage expectations before fixing:", bad_pct_nrows %>% nrow())
+
+bad_pct_nrows
+```
+
+
+##### Change coverage values based on special cases.
+
+My rationale for this is...
+* It seemed pretty reasonable to force values to be 0 or 100 if they are generally close to it, as this is what we did in class.
+* I however decided that 100 from the percentage window was too much deviation for the observation to be valid, and made it NA
+* The special case of -100 I figured is just an input error, which was just mean to be positive 100.
+```{r}
+cover_fix3 <- cover_fix2 %>% 
+  mutate(
+    
+    # for all `*_cover` cols
+    across(Snow_cover:Total_cover, ~ case_when(
+      
+      # make -100 positive specifically
+      .x == -100 ~ abs(.x),
+      
+      # NA vals too far outside the range
+      .x > 200 | .x < -100 ~ NA, 
+      
+      # force vals outside but close to range within range
+      .x > 100 ~ 100,
+      .x < 0 ~ 0, 
+      
+      # return original val if val is ok
+      .default = .x
+      )
+    )
+  )
+```
+
+##### Demonstrate that all rows have been fixed.
+```{r}
+good_pct_nrows <- cover_fix3 %>% filter(
+  
+  # for all `*_cover` cols
+  if_any(Snow_cover:Total_cover, ~ .x > 100 | .x < 0)
+  ) %>% 
+  
+  # get obs
+  nrow()
+
+cat("Number if rows not respecting percentage expectations before fixing:", good_pct_nrows)
+```
+
+
+# Recomputing `Total_cover`
+
+For the revision, we will be
+* calculating the missing cover values based on complements of the cover values present in data, where possible.
+* Noting data quality in the notes column
+* Adjusting Total_cover
+  * if it's above but close to 100, coerce to 100
+  * if it's below, coerce or recalculate to 100
+  * if it's significantly above, NA
+  
+This strategy corrects the dataset to a set of rules as much as possible while keeping the data that's there as much as possible, reducing error.
+
+```{r}
+
+# filter out rows where all cover cols are NA
+cover_fix_4a <- cover_fix3 %>% filter(!if_all(Snow_cover:Total_cover, ~ is.na(.x)))
+
+
+# look for rows that can be immediately complemented
+# this returns no rows, no editing needed
+cover_fix_4a %>% filter(Snow_cover + Water_cover + Land_cover != 100 & if_any(Snow_cover:Land_cover, ~ is.na(.)))
+
+
+# look for rows where total cover not na but missing values otherwise
+cover_fix_4b <- cover_fix_4a %>% 
+  mutate(across(c(Snow_cover, Water_cover), ~ ifelse(Total_cover == 100 & is.na(.), (Total_cover - Land_cover)/2, .))) %>% 
+  mutate(across(c(Snow_cover, Land_cover), ~ ifelse(Total_cover == 100 & is.na(.), (Total_cover - Water_cover)/2, .))) %>% 
+  mutate(across(c(Land_cover, Water_cover), ~ ifelse(Total_cover == 100 & is.na(.), (Total_cover - Snow_cover)/2, .)))
+
+# fill in the easy complements
+cover_fix_4c <- cover_fix_4b %>% mutate(
+  Snow_cover = ifelse(is.na(Snow_cover) & 
+                        !is.na(Water_cover) & !is.na(Land_cover), 
+                      Total_cover - (Land_cover + Water_cover), 
+                      Snow_cover), 
+  Water_cover = ifelse(is.na(Water_cover) & 
+                        !is.na(Snow_cover) & !is.na(Land_cover), 
+                      Total_cover - (Snow_cover + Land_cover), 
+                      Water_cover), 
+  Land_cover = ifelse(is.na(Land_cover) & 
+                        !is.na(Snow_cover) & !is.na(Water_cover), 
+                      Total_cover - (Snow_cover + Water_cover), 
+                      Land_cover)
+)
+
+# just notate that these rest of the columns violate the rules: don't equal to 100
+cover_fix_4d <- cover_fix_4c %>% 
+  mutate(Notes = ifelse((Snow_cover + Land_cover + Water_cover != 100) & is.na(Notes), paste(Notes, "Rule Violation: does not equal 100%"), Notes))
+
+
+# remove all rows with all nas in normal cover cols
+cover_fix_4e <- cover_fix_4d %>% filter(!if_all(Snow_cover:Total_cover, ~ is.na(.x)))
+
+# if covers equal 100, total for total cover
+cover_fix_4f <- cover_fix_4e %>% 
+  mutate(Total_cover = ifelse(Total_cover != 100 & Snow_cover + Water_cover + Land_cover == 100, Snow_cover + Water_cover + Land_cover, Total_cover))
+
+# flag all other cols in notes
+cover_fix_4g <- cover_fix_4f %>% 
+  mutate(Notes = ifelse( Total_cover != 100 | Snow_cover + Water_cover + Land_cover != 100, 
+                         paste(Notes, ", data ranked low quality for rule violation"), Notes))
+
+cover_fix_final <- cover_fix_4g
+```
+
+
+
+# Write csv
+```{r}
+write_csv(cover_fix_final, "data/processed/all_cover_fixed_JOSHUAPAULCOHEN.csv")
+```
+
+# Print final table
+```{r}
+cover_fix_final
+```
