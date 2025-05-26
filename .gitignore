@@ -1,4 +1,3 @@
-/data
 /renv
 renv.lock
 
@@ -13,3 +12,7 @@ renv.lock
 
 # added files
 eds213_data_cleaning_assign_JOSHUAPAULCOHEN.qmd
+processed/
+raw/
+docs/
+eds213_data_cleaning_assign_JOSHUAPAULCOHEN_files/
